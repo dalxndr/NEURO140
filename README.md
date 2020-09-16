@@ -7,3 +7,10 @@ This is an implementation of "Overcoming catastrophic forgetting in neural netwo
 
 ### experiment.ipynb:
   Trains and tests a single network on three MNIST classification tasks sequentially (i.e., once the network begins training on a given task, it is never exposed     to previous task training data again).
+
+## Evaluation
+Below a performance comparison between networks trained either with pure SGD or additionally with EWC, evaluated on two permuted mnist tasks. 
+
+<img src="performance_sgd.png" alt="Network without EWC" width="400"/> <img src="performance_ewc.png" alt="Network with EWC" width="400"/>
+<!-- ![Network without EWC](performance_sgd.png =100x)    
+![Network with EWC](performance_ewc.png =100x) -->
