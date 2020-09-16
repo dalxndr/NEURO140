@@ -1,117 +1,244 @@
-import tensorflow as tf
-import numpy as np
-from copy import deepcopy
+'''
+implementation of Elastic Weight Consolidation (Kirkpatrick et al, 2017)
+Timo Flesch, 2020
+'''
+import tensorflow as tf 
+import numpy as np 
+import os 
 import matplotlib.pyplot as plt
-from IPython import display
 
-# variable initialization functions
-def weight_variable(shape):
-    initial = tf.truncated_normal(shape, stddev=0.1)
-    return tf.Variable(initial)
-
-def bias_variable(shape):
-    initial = tf.constant(0.1, shape=shape)
-    return tf.Variable(initial)
-
-class Model:
-    def __init__(self, x, y_):
-
-        in_dim = int(x.get_shape()[1]) # 784 for MNIST
-        out_dim = int(y_.get_shape()[1]) # 10 for MNIST
-
-        self.x = x # input placeholder
-
-        # simple 2-layer network
-        W1 = weight_variable([in_dim,50])
-        b1 = bias_variable([50])
-
-        W2 = weight_variable([50,out_dim])
-        b2 = bias_variable([out_dim])
-
-        h1 = tf.nn.relu(tf.matmul(x,W1) + b1) # hidden layer
-        self.y = tf.matmul(h1,W2) + b2 # output layer
-
-        self.var_list = [W1, b1, W2, b2]
-
-        # vanilla single-task loss
-        self.cross_entropy = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(labels=y_, logits=self.y))
-        self.set_vanilla_loss()
-
-        # performance metrics
-        correct_prediction = tf.equal(tf.argmax(self.y,1), tf.argmax(y_,1))
-        self.accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
-
-    def compute_fisher(self, imgset, sess, num_samples=200, plot_diffs=False, disp_freq=10):
-        # computer Fisher information for each parameter
-
-        # initialize Fisher information for most recent task
-        self.F_accum = []
-        for v in range(len(self.var_list)):
-            self.F_accum.append(np.zeros(self.var_list[v].get_shape().as_list()))
-
-        # sampling a random class from softmax
-        probs = tf.nn.softmax(self.y)
-        class_ind = tf.to_int32(tf.multinomial(tf.log(probs), 1)[0][0])
-
-        if(plot_diffs):
-            # track differences in mean Fisher info
-            F_prev = deepcopy(self.F_accum)
-            mean_diffs = np.zeros(0)
-
-        fish_gra = tf.gradients(tf.log(probs[0,class_ind]), self.var_list)
-        for i in range(num_samples):
-            # select random input image
-            im_ind = np.random.randint(imgset.shape[0])
-            # compute first-order derivatives
-            ders = sess.run(fish_gra, feed_dict={self.x: imgset[im_ind:im_ind+1]})
-            # square the derivatives and add to total
-            for v in range(len(self.F_accum)):
-                self.F_accum[v] += np.square(ders[v])
-            if(plot_diffs):
-                if i % disp_freq == 0 and i > 0:
-                    # recording mean diffs of F
-                    F_diff = 0
-                    for v in range(len(self.F_accum)):
-                        F_diff += np.sum(np.absolute(self.F_accum[v]/(i+1) - F_prev[v]))
-                    mean_diff = np.mean(F_diff)
-                    mean_diffs = np.append(mean_diffs, mean_diff)
-                    for v in range(len(self.F_accum)):
-                        F_prev[v] = self.F_accum[v]/(i+1)
-                    plt.plot(range(disp_freq+1, i+2, disp_freq), mean_diffs)
-                    plt.xlabel("Number of samples")
-                    plt.ylabel("Mean absolute Fisher difference")
-                    display.display(plt.gcf())
-                    display.clear_output(wait=True)
-
-        # divide totals by number of samples
-        for v in range(len(self.F_accum)):
-            self.F_accum[v] /= num_samples
-
-    def star(self):
-        # used for saving optimal weights after most recent task training
-        self.star_vars = []
-
-        for v in range(len(self.var_list)):
-            self.star_vars.append(self.var_list[v].eval())
-
-    def restore(self, sess):
-        # reassign optimal weights for latest task
-        if hasattr(self, "star_vars"):
-            for v in range(len(self.var_list)):
-                sess.run(self.var_list[v].assign(self.star_vars[v]))
-
-    def set_vanilla_loss(self):
-        self.train_step = tf.train.GradientDescentOptimizer(0.1).minimize(self.cross_entropy)
-
-    def update_ewc_loss(self, lam):
-        # elastic weight consolidation
-        # lam is weighting for previous task(s) constraints
-
-        if not hasattr(self, "ewc_loss"):
-            self.ewc_loss = self.cross_entropy
-
-        for v in range(len(self.var_list)):
-            self.ewc_loss += (lam/2) * tf.reduce_sum(tf.multiply(self.F_accum[v].astype(np.float32),tf.square(self.var_list[v] - self.star_vars[v])))
-        self.train_step = tf.train.GradientDescentOptimizer(0.1).minimize(self.ewc_loss)
+from datetime import datetime 
+from sklearn.utils import shuffle 
+from copy import deepcopy
+from tensorflow.examples.tutorials.mnist import input_data
 
 
+
+# ----------------------------------------------------------------------------------------
+# parameters
+# ----------------------------------------------------------------------------------------
+
+# define a few variables 
+N_INPUTS = 784
+N_CLASSES = 10
+N_HIDDEN = 100
+WEIGHT_INIT = 1e-2
+
+N_ITERS = int(1e4)
+
+SGD_LRATE = 1e-1
+RUN_EWC = False
+EWC_LAM = 15
+N_FIM_SAMPLES = 500
+MINIBATCH_SIZE = 250
+
+STEP_DISP = 100
+VERBOSE = True
+
+# ----------------------------------------------------------------------------------------
+# network class and helper functions 
+# ----------------------------------------------------------------------------------------
+
+def var_weights(shape,std=1e-3):
+    return tf.Variable(tf.truncated_normal(shape,stddev=std))
+
+def var_bias(shape,const=0.01):
+    return tf.Variable(tf.constant(const,shape=shape))
+
+class Nnet(object):
+    def __init__(self,sess):
+        self.x_features = tf.placeholder(tf.float32, [None, N_INPUTS], name='x_in')
+        self.y_true = tf.placeholder(tf.float32, [None, N_CLASSES], name='y_true')
+
+        # nnet 
+        self.w_hf = var_weights((N_INPUTS,N_HIDDEN),std=np.sqrt(WEIGHT_INIT))
+        self.b_hf = var_bias((1,N_HIDDEN))
+
+        self.x_h = tf.add(tf.matmul(self.x_features,self.w_hf),self.b_hf)
+        self.y_h = tf.nn.relu(self.x_h)
+
+        self.w_o = var_weights((N_HIDDEN,N_CLASSES),std=1/np.sqrt(N_HIDDEN))
+        self.b_o = var_bias((1,N_CLASSES))
+        self.logits = tf.add(tf.matmul(self.y_h,self.w_o),self.b_o)
+
+        self.thetas = [self.w_hf, self.b_hf, self.w_o, self.b_o]
+        self.sess = sess
+
+        # xent loss for multiclass 
+        if N_CLASSES>1:
+            self.y_pred = tf.nn.softmax(self.logits)
+            self.cross_entropy = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(labels=self.y_true, logits=self.logits))
+            correct_prediction = tf.equal(tf.argmax(self.logits,1), tf.argmax(self.y_true,1))
+            self.accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
+        else:
+            self.y_pred = tf.nn.sigmoid(self.logits)
+            self.cross_entropy = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=self.y_true,logits=self.logits))
+            # self.cross_entropy = tf.reduce_mean(tf.multiply(self.y_true,tf.log(self.y_pred+1e-10))+tf.multiply(1-self.y_true,tf.log(1-self.y_pred+1e-10)))
+            correct_prediction = tf.equal(self.y_pred, self.y_true)
+            self.accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
+
+        self.set_loss_funct()
+
+    def switch_to_ewc(self,x_data):
+        # copy old parameter values 
+        self.copy_thetas()
+        # compute (diagonal of ) fisher information matrix 
+        self.compute_diag_fim(x_data)
+        # change loss function 
+        self.set_loss_funct(run_ewc=True)
+        
+    def set_loss_funct(self,run_ewc=False):
+        if run_ewc==True:
+            self.ewc_loss = self.compute_ewc_loss()            
+            print('hooray')
+            self.train_step = tf.train.GradientDescentOptimizer(SGD_LRATE).minimize(self.ewc_loss)
+        else:            
+            self.train_step = tf.train.GradientDescentOptimizer(SGD_LRATE).minimize(self.cross_entropy)
+        
+
+
+    def copy_thetas(self):
+        '''
+            copy thetas of old task 
+        '''
+        self.old_thetas = []
+        for ii in range(len(self.thetas)):
+            self.old_thetas.append(self.thetas[ii].eval())
+        
+
+    def compute_ewc_loss(self):
+        '''
+            compute ewc regulariser 
+        '''
+        loss = self.cross_entropy
+        for ii in range(len(self.thetas)):
+            loss += (EWC_LAM/2) * tf.reduce_sum(tf.multiply(self.FIM[ii].astype(np.float32),(self.thetas[ii] - self.old_thetas[ii])**2))
+        return loss
+
+
+    def compute_diag_fim(self, x_data, n_samples=N_FIM_SAMPLES):
+        '''
+            compute diagonal fisher information matrix
+        '''
+        FIM = []
+        for ii in range(len(self.thetas)):
+            FIM.append(np.zeros(self.thetas[ii].get_shape().as_list()))
+        # -- set-up graph nodes--
+        # true fisher information: use predicted label
+        if N_CLASSES > 0:
+            c_index = tf.argmax(self.y_pred,1)[0]
+        else:
+            c_index = 0
+        # get gradients wrt log likelihood
+        compute_gradients = tf.gradients(tf.log(self.y_pred[0,c_index]),self.thetas)
+        
+        # -- compute FIM (expected squared score of ll) --
+        for ii in range(n_samples):
+            idx = np.random.randint(x_data.shape[0])
+            grads = self.sess.run(compute_gradients, feed_dict={self.x_features:x_data[idx:idx+1,:]})
+            # add squared gradients of score:
+            for ii in range(len(self.thetas)):
+                FIM[ii] +=  grads[ii]**2 # np.square(grads[ii])
+            # normalise:
+            self.FIM  = [FIM[ii]/n_samples for ii in range(len(self.thetas))]
+       
+# ----------------------------------------------------------------------------------------
+# data functions
+# ----------------------------------------------------------------------------------------
+def load_mnist_data():    
+    return  input_data.read_data_sets('MNIST_data', one_hot=True)
+
+
+
+def permute_mnist(mnist):
+    '''
+    # return a new mnist dataset w/ pixels randomly permuted (found this funct in Ari Seff's github)
+    '''
+    perm_inds = np.arange(mnist.train.images.shape[1])
+    np.random.shuffle(perm_inds)
+    mnist2 = deepcopy(mnist)
+    sets = ["train", "validation", "test"]
+    for set_name in sets:
+        this_set = getattr(mnist2, set_name) # shallow copy
+        this_set._images = np.transpose(np.array([this_set.images[:,c] for c in perm_inds]))
+    return mnist2
+
+# ----------------------------------------------------------------------------------------
+# result visualiser
+# ----------------------------------------------------------------------------------------
+def disp_results(results):
+    '''
+    displays results as time series of test accuracies 
+    '''
+    plt.figure(1)
+    plt.plot(results['acc1'],'k-',linewidth=2)
+    plt.plot(results['acc2'],'r-',linewidth=2)    
+    plt.xlabel('iter')
+    plt.ylabel('test accuracy')
+    plt.legend(['first task','second task'])
+    if RUN_EWC:
+        plt.title('Elastic Weight Consolidation')
+    else:
+        plt.title('Vanilla SGD')
+    plt.grid()
+    plt.show()
+
+# ----------------------------------------------------------------------------------------
+# trainer
+# ----------------------------------------------------------------------------------------
+def train_nnet():
+    # init variables 
+    results = {
+        'acc1': [],
+        'acc2': []
+    }
+    # load dataset 
+    dataset1 = load_mnist_data()
+    # now create permuted mnist 
+    dataset2 = permute_mnist(dataset1)
+    with tf.Session() as sess:
+        # initialise neural network 
+        nnet = Nnet(sess)
+        sess.run(tf.global_variables_initializer())
+        # train on mnist 
+        for ep in range(N_ITERS):
+            mbatch = dataset1.train.next_batch(MINIBATCH_SIZE)
+            nnet.train_step.run(feed_dict={nnet.x_features:mbatch[0],nnet.y_true:mbatch[1]})
+            if ep%STEP_DISP==0:
+                results['acc1'].append(nnet.accuracy.eval(feed_dict={nnet.x_features:dataset1.test.images,nnet.y_true:dataset1.test.labels}))
+                results['acc2'].append(nnet.accuracy.eval(feed_dict={nnet.x_features:dataset2.test.images,nnet.y_true:dataset2.test.labels}))
+                if VERBOSE:
+                    print('episode {:d} on 1st task: accuracy 1st task {:2f}, accuracy 2nd task {:2f}'.format(ep,results['acc1'][-1],results['acc2'][-1]))
+        
+        if RUN_EWC:
+            # ... run network with ewc:            
+            nnet.switch_to_ewc(dataset1.train.images)
+            for ep in range(N_ITERS):
+                mbatch = dataset2.train.next_batch(MINIBATCH_SIZE)
+                nnet.train_step.run(feed_dict={nnet.x_features:mbatch[0],nnet.y_true:mbatch[1]})
+                if ep%STEP_DISP==0:
+                    results['acc1'].append(nnet.accuracy.eval(feed_dict={nnet.x_features:dataset1.test.images,nnet.y_true:dataset1.test.labels}))
+                    results['acc2'].append(nnet.accuracy.eval(feed_dict={nnet.x_features:dataset2.test.images,nnet.y_true:dataset2.test.labels}))
+                    if VERBOSE: 
+                        print('episode {:d} on 2nd task: accuracy 1st task {:2f}, accuracy 2nd task {:2f}'.format(ep,results['acc1'][-1],results['acc2'][-1]))
+            
+        else:
+            # ... run vanilla sgd: 
+            for ep in range(N_ITERS):
+                mbatch = dataset2.train.next_batch(MINIBATCH_SIZE)
+                nnet.train_step.run(feed_dict={nnet.x_features:mbatch[0],nnet.y_true:mbatch[1]})
+                if ep%STEP_DISP==0:
+                    results['acc1'].append(nnet.accuracy.eval(feed_dict={nnet.x_features:dataset1.test.images,nnet.y_true:dataset1.test.labels}))
+                    results['acc2'].append(nnet.accuracy.eval(feed_dict={nnet.x_features:dataset2.test.images,nnet.y_true:dataset2.test.labels}))
+                    if VERBOSE:
+                        print('episode {:d}on 2nd task: accuracy 1st task {:2f}, accuracy 2nd task {:2f}'.format(ep,results['acc1'][-1],results['acc2'][-1]))
+
+    return results
+
+
+# ----------------------------------------------------------------------------------------
+# main experiment
+# ----------------------------------------------------------------------------------------
+if __name__ == "__main__":
+    results = train_nnet()
+    disp_results(results)
