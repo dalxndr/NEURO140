@@ -1,6 +1,6 @@
 # Addressing the Stability-Plasticity Dilemma Through Elastic Weight Consolidation and Continual Learning Methods
 
-This is an implementation of "Overcoming catastrophic forgetting in neural networks" (https://arxiv.org/abs/1612.00796) for supervised learning in TensorFlow. Loosely inspired by Ari Seff's implementation for learning purposes. Coursework for NEURO 140: Biological and Artificial Intelligence (Harvard University).
+This is an implementation of "Overcoming catastrophic forgetting in neural networks" (https://arxiv.org/abs/1612.00796) for supervised learning in TensorFlow.  Coursework for NEURO 140: Biological and Artificial Intelligence (Harvard University). Loosely inspired by Ari Seff's implementation for learning purposes.
 
 ### model.py: 
   Defines a simple fully-connected network and methods to compute the diagonal of the Fisher information matrix.
