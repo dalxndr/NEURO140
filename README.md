@@ -1,6 +1,6 @@
 # NEURO140
 
-### Elastic Weight Consolidation (DeepMind Paper Implementation with Tensorflow.)
+### Elastic Weight Consolidation (DeepMind Paper Implementation with Tensorflow)
 
 This is an implementation of "Overcoming catastrophic forgetting in neural networks" (https://arxiv.org/abs/1612.00796) for supervised learning in TensorFlow.
 
