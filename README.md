@@ -2,7 +2,7 @@
 
 ### Elastic Weight Consolidation (DeepMind Paper Implementation with Tensorflow)
 
-This is an implementation of "Overcoming catastrophic forgetting in neural networks" (https://arxiv.org/abs/1612.00796) for supervised learning in TensorFlow.
+This is an implementation of "Overcoming catastrophic forgetting in neural networks" (https://arxiv.org/abs/1612.00796) for supervised learning in TensorFlow. Loosely inspired by Ari Seff's implementation for learning purposes.
 
 ### model.py: 
   Defines a simple fully-connected network and methods to compute the diagonal of the Fisher information matrix.
